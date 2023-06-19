@@ -1,21 +1,32 @@
 # -*- coding: utf-8 -*-
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import sys
 import threading
 import time
+import urllib.parse
 
 import requests
 
 
+def signature(timestamp, uri, secret):
+    string_to_sign = '' + timestamp + '\n' + uri
+    hmac_code = hmac.new(secret.encode(), string_to_sign.encode(), hashlib.sha1).digest()
+    return base64.b64encode(hmac_code).decode()
+
+
 class ApolloClient(object):
-    def __init__(self, app_id, cluster='default', config_server_url='http://localhost:8080', timeout=35, ip=None):
+    def __init__(self, app_id, cluster='default', config_server_url='http://localhost:8080', timeout=35, ip=None, access_key=None):
         self.config_server_url = config_server_url
         self.appId = app_id
         self.cluster = cluster
         self.timeout = timeout
         self.stopped = False
         self.init_ip(ip)
+        self.access_key = access_key
 
         self._stopping = False
         self._cache = {}
@@ -81,7 +92,7 @@ class ApolloClient(object):
 
     def _cached_http_get(self, key, default_val, namespace='application'):
         url = '{}/configfiles/json/{}/{}/{}?ip={}'.format(self.config_server_url, self.appId, self.cluster, namespace, self.ip)
-        r = requests.get(url)
+        r = requests.get(url, headers=self._sign(url))
         if r.ok:
             data = r.json()
             self._cache[namespace] = data
@@ -96,7 +107,7 @@ class ApolloClient(object):
 
     def _uncached_http_get(self, namespace='application'):
         url = '{}/configs/{}/{}/{}?ip={}'.format(self.config_server_url, self.appId, self.cluster, namespace, self.ip)
-        r = requests.get(url)
+        r = requests.get(url, headers=self._sign(url))
         if r.status_code == 200:
             data = r.json()
             self._cache[namespace] = data['configurations']
@@ -118,11 +129,12 @@ class ApolloClient(object):
                 'notificationId': notification_id
             })
 
-        r = requests.get(url=url, params={
+        params = {
             'appId': self.appId,
             'cluster': self.cluster,
             'notifications': json.dumps(notifications, ensure_ascii=False)
-        }, timeout=self.timeout)
+        }
+        r = requests.get(url=url, params=params, timeout=self.timeout, headers=self._sign(url, params))
 
         logging.getLogger(__name__).debug('Long polling returns %d: url=%s', r.status_code, r.request.url)
 
@@ -150,6 +162,18 @@ class ApolloClient(object):
 
         logging.getLogger(__name__).info("Listener stopped!")
         self.stopped = True
+
+    def _sign(self, url, params=None):
+        if not self.access_key:
+            return None
+        if params:
+            url += '?' + urllib.parse.urlencode(params)
+        headers = {}
+        uri = url[len(self.config_server_url):len(url)]
+        time_unix_now = str(int(round(time.time() * 1000)))
+        headers['Authorization'] = f'Apollo {self.appId}:{signature(time_unix_now, uri, self.access_key)}'
+        headers['Timestamp'] = time_unix_now
+        return headers
 
 
 if __name__ == '__main__':
